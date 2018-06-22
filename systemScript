@@ -1,0 +1,97 @@
+#!/bin/bash
+# Author:  Alnex<liqinghai058@live.com>
+# Blog:  https://extp.org
+#
+# 如果服务器是多个网卡，请在设置iptables时，指定公网网卡，例如阿里云eth0是内网，eth1是公网，在iptables做nat转发时请设置eth1.
+# 如果VPS服务器就不用修改iptables的nat转发，VPS一般都是单网卡
+#
+
+function install_vpn(){
+    printf "
+#######################################################################
+#            Installs a PPTP VPN-only system for CentOS               #
+#            You must be root to run this script                      #
+#######################################################################
+"
+
+    # clean backup file and iptables -F
+	yum remove -y pptpd ppp
+	iptables -F
+	iptables --flush POSTROUTING --table nat
+	iptables --flush FORWARD
+	rm -rf /etc/pptpd.conf* && rm -rf /etc/ppp
+
+    # install epel and package
+    yum install -y https://dl.fedoraproject.org/pub/epel/epel-release-latest-7.noarch.rpm && yum makecache
+    yum install -y wget openssl ppp pptpd iptables iptables-services gcc gcc-c++ make
+
+    # kernel
+    echo 'net.ipv4.ip_forward=1' >> /etc/sysctl.conf
+    sed -i 's/net.ipv4.ip_forward.*/net.ipv4.ip_forward=1/g' /etc/sysctl.conf
+    sysctl -p
+
+    # pptpd conf
+    echo "localip 172.16.36.1" >> /etc/pptpd.conf
+	echo "remoteip 172.16.36.2-254" >> /etc/pptpd.conf
+
+	# dns conf
+	cat >> /etc/ppp/options.pptpd << EOF
+ms-dns 114.114.114.114
+ms-dns 8.8.8.8
+ms-dns 8.8.4.4
+EOF
+
+    # iptables conf
+    ETH=$(route | grep default | awk '{print $NF}')
+    iptables -A INPUT -p tcp -m state --state NEW -m tcp --dport 1723 -j ACCEPT
+	iptables -A INPUT -p gre -j ACCEPT
+	iptables -t nat -A POSTROUTING -o ${ETH} -j MASQUERADE
+	iptables -I FORWARD -p tcp --syn -i ppp+ -j TCPMSS --set-mss 1356
+    iptables-save > /etc/sysconfig/iptables
+    sed -i 's/^-A INPUT -j REJECT --reject-with icmp-host-prohibited/#-A INPUT -j REJECT --reject-with icmp-host-prohibited/g' /etc/sysconfig/iptables
+    sed -i 's/^-A FORWARD -j REJECT --reject-with icmp-host-prohibited/#-A FORWARD -j REJECT --reject-with icmp-host-prohibited/g' /etc/sysconfig/iptables
+
+    # test user：
+    PASS=`openssl rand 6 -base64`
+	if [ "$1" != "" ]
+	then PASS=$1
+	fi
+
+    echo "vpn   pptpd   ${PASS}   *" >> /etc/ppp/chap-secrets
+
+    systemctl restart iptables
+    systemctl enable iptables
+    systemctl restart pptpd
+    systemctl enable pptpd
+
+    echo -e "VPN service is installed, your VPN username is \033[31mvpn\033[0m, VPN password is \033[31m${PASS}\033[0m"
+
+}
+
+function add_vpn_user(){
+    read -p "Please input username: " VPN_USER
+    read -p "Please input password: " VPN_PASS
+	echo "${VPN_USER}   pptpd   ${VPN_PASS}   *" >> /etc/ppp/chap-secrets
+	systemctl restart iptables
+	systemctl restart pptpd
+}
+
+function repaire_vpn(){
+	echo "begin to repaire VPN";
+	mknod /dev/ppp c 108 0
+	systemctl restart iptables
+	systemctl restart pptpd
+}
+
+echo "which do you want to?input the number."
+echo "1: install VPN service"
+echo "2: add vpn user"
+echo "3: repaire_vpn"
+read num
+
+case "${num}" in
+[1] ) (install_vpn);;
+[2] ) (add_vpn_user);;
+[2] ) (repaire_vpn);;
+*) echo "nothing,exit";;
+esac
